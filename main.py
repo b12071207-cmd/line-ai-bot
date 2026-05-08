@@ -5,7 +5,8 @@ from linebot.v3.messaging import (
     ApiClient,
     MessagingApi,
     ReplyMessageRequest,
-    TextMessage
+    TextMessage,
+    ImageMessage
 )
 from linebot.v3.webhooks import MessageEvent, TextMessageContent
 from linebot.v3.exceptions import InvalidSignatureError
@@ -24,6 +25,18 @@ ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY')
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 configuration = Configuration(access_token=LINE_CHANNEL_ACCESS_TOKEN)
 claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+# 對話記憶：記住每個用戶最近的對話（最多10則）
+conversation_history = {}
+
+# 價格表圖片公開網址（上傳圖片後填入）
+PRICE_IMAGE_URL = "https://raw.githubusercontent.com/b12071207-cmd/line-ai-bot/main/price_list.jpg"
+
+# 偵測是否為價格相關問題
+PRICE_KEYWORDS = ['價格', '費用', '多少錢', '價位', '收費', '怎麼收費', '體驗價', '價目', '多少', '費用']
+
+def is_price_question(message):
+    return any(kw in message for kw in PRICE_KEYWORDS)
 
 SYSTEM_PROMPT = """你是陶澤按摩健康管理中心的AI客服助理，名字叫「小陶」。
 你只能根據以下提供的資訊回答，不可自行補充或猜測。
@@ -97,6 +110,11 @@ SYSTEM_PROMPT = """你是陶澤按摩健康管理中心的AI客服助理，名�
 ===== 服務後注意事項 =====
 按摩後身體代謝加速容易口渴，需大量補充水分，不要喝冰水。
 
+===== 儲值金查詢 =====
+當客人詢問「充值」、「儲值」、「儲值金」、「餘額」、「還剩多少錢」、「剩多少」、「我的點數」等，
+代表客人在詢問會員儲值金餘額，請固定回覆：
+「您好！稍等一下小編幫您做查詢～ 或者您可以點選 Line 下方的選單，點選「紀錄查詢」，再點選「儲值」，就可以知道剩餘儲值金嘍！😊」
+
 ===== 常見問題 QA =====
 Q：第一次來適合選哪個服務？
 A：有淺眠或壓力大的朋友推薦60分鐘頭肩頸放鬆管理；一段時間沒按摩身體緊繃的朋友推薦90分鐘全身肌筋膜管理。
@@ -114,25 +132,38 @@ Q：頭肩頸放鬆管理會按到腰嗎？
 A：60分鐘頭肩頸主要針對頭肩頸部位，師傅會客製化評估。如有腰部需求可告知師傅，想更全面可選90分鐘全身肌筋膜管理或120分鐘客製化按摩。
 
 ===== 預約時段查詢規則 =====
-當客人詢問「有位子嗎」、「有空位嗎」、「今天有位子嗎」、「可以預約嗎」、「有辦法預約嗎」等，
-這是在問預約時段是否有空，不是問停車位。
-請回覆：「您想預約哪一間分店呢？想約什麼時間？小編幫您查詢一下🙏」
-然後轉交真人確認。不要自行回答「有」或「沒有」，也不要提建議提前幾天的說法。
+當客人詢問「有位子嗎」、「有空位嗎」、「今天有位子嗎」、「可以預約嗎」、「有辦法預約嗎」、
+「今天有時間嗎」、「可以安排XX人嗎」、「今天有空嗎」等，表示客人想預約但還沒說分店，
+請回覆：「您好～ 請問想預約哪一間分店呢？小編幫您查詢！」
+不要自行回答「有」或「沒有」，也不要提建議提前幾天的說法。
+
+當客人已經提供明確的分店或時間（例如：「今天板橋店10點還能預約嗎」、「明天忠孝店下午有位子嗎」），
+不要再問服務項目、姓名、電話等，直接回覆：
+「請稍等～ 小編幫您查詢🙏」
+
+收集預約資訊的順序規則（非常重要）：
+1. 先問「分店」（如果還不知道）
+2. 再問「時間」（如果對話中已經提過「今天」「明天」等就不用再問）
+3. 最後才問服務項目（大多數客人都是預約按摩，不用主動問，除非客人沒提到）
+4. 絕對不要在同一則訊息裡問超過一個問題
+5. 對話中客人已經說過的資訊，不要再重複詢問
 
 ===== 回覆規則 =====
-1. 用親切、專業的繁體中文回覆，口吻像小編一樣自然
-2. 回覆簡短清楚，不超過 150 字
-3. 不要使用 Markdown 格式（不要用 * # 等符號），可以用數字或換行來排版
-4. 不要主動說「建議提前1天預約」或「假日建議提前2~3天」，除非客人直接問需要提前多久
-5. 遇到以下情況，請回覆固定話術，不要自行處理：
-   - 客人詢問預約時段是否有空（有位子嗎、可以預約嗎等）
-   - 客人要進行預約登記（已提供姓名、電話、時間等資訊）
-   - 客訴、投訴、退費
-   - 指定特定師傅的檔期查詢
-   - 需要真人確認的特殊需求
+1. 用親切、可愛、像真人小編的口吻回覆繁體中文，語氣溫暖自然，偶爾可以用「哦」「喔」「唷」「呀」「～」讓語氣更柔和
+2. 可以適當加入 emoji（如 😊 🙌 💆 ✨ 💕）讓訊息更有溫度，但不要過多
+3. 回覆簡短清楚，不超過 150 字
+4. 不要使用 Markdown 格式（不要用 * # 等符號），可以用數字或換行來排版
+5. 不要主動說「建議提前1天預約」或「假日建議提前2~3天」，除非客人直接問需要提前多久
+5. 遇到以下情況，請用對應的話術回覆：
 
-   固定回覆話術：
-   「感謝您的來訊！您的問題需要由專員為您服務，我們會盡快回覆您，請稍候🙏」
+   【客人要取消預約】→ 回覆：
+   「好的沒問題！小編這邊幫您做取消～🙏」
+
+   【客人詢問預約時段是否有空、要進行預約登記、指定師傅檔期、需要真人確認的特殊需求】→ 回覆：
+   「好的沒問題！稍等一下，小編幫您查詢～🙏」
+
+   【客訴、投訴、退費】→ 回覆：
+   「好的沒問題！稍等一下，小編幫您查詢～🙏」
 
 6. 問題不在知識範圍內，也回覆上方話術
 """
@@ -156,26 +187,56 @@ def webhook():
 @handler.add(MessageEvent, message=TextMessageContent)
 def handle_message(event):
     user_message = event.message.text
+    user_id = event.source.user_id
+
+    # 檢查傳訊者名稱，若包含「師傅」則不回覆
+    try:
+        with ApiClient(configuration) as api_client:
+            line_bot_api = MessagingApi(api_client)
+            profile = line_bot_api.get_profile(user_id)
+            if '師傅' in profile.display_name:
+                return
+    except Exception:
+        pass  # 取得不到名稱時，照常回覆
+
+    # 取得或建立此用戶的對話記憶（最多保留10則）
+    if user_id not in conversation_history:
+        conversation_history[user_id] = []
+    history = conversation_history[user_id]
+    history.append({"role": "user", "content": user_message})
+    if len(history) > 10:
+        history.pop(0)
 
     try:
         response = claude_client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=300,
             system=SYSTEM_PROMPT,
-            messages=[
-                {"role": "user", "content": user_message}
-            ]
+            messages=history
         )
         reply_text = response.content[0].text
     except Exception:
         reply_text = "感謝您的來訊！目前系統忙碌中，請稍後再試，或來電洽詢🙏"
+
+    # 把 AI 回覆也存入對話記憶
+    history.append({"role": "assistant", "content": reply_text})
+    if len(history) > 10:
+        history.pop(0)
+
+    # 組合回覆訊息（價格問題附上圖片）
+    messages_to_send = [TextMessage(text=reply_text)]
+    if is_price_question(user_message):
+        messages_to_send.append(ImageMessage(
+            original_content_url=PRICE_IMAGE_URL,
+            preview_image_url=PRICE_IMAGE_URL
+        ))
 
     with ApiClient(configuration) as api_client:
         line_bot_api = MessagingApi(api_client)
         line_bot_api.reply_message_with_http_info(
             ReplyMessageRequest(
                 reply_token=event.reply_token,
-                messages=[TextMessage(text=reply_text)]
+                messages=messages_to_send
             )
         )
 
